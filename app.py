@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from catalog import load_catalog, refresh_catalog
 from nvidia_client import NVIDIA_BASE_URL, get_client, load_settings, save_settings
-from router import choose_model
+from router import choose_candidates
 from tools import TOOLS, execute_tool
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -137,13 +137,38 @@ def sse(event: str, data: dict) -> str:
     return payload
 
 
+def is_model_not_found(e: Exception) -> bool:
+    """NVIDIA bazı katalog modellerini hesapta gerçek bir function olarak
+    deploy etmemiş oluyor ve 404 dönüyor — bu, o modele özgü bir hata,
+    diğer adayları denemeye devam etmek mantıklı. 401/429 gibi hatalar ise
+    hesap genelinde geçerli olduğundan hemen durup kullanıcıya gösteriyoruz."""
+    if getattr(e, "status_code", None) == 404:
+        return True
+    return "Error code: 404" in str(e) or "'status': 404" in str(e)
+
+
+def try_candidates(client, candidates, create_kwargs):
+    """Aday model id'lerini sırayla dener, 404'te bir sonrakine geçer.
+    (used_model, response) veya modelin hepsi başarısızsa (None, last_error) döner."""
+    last_err = None
+    for candidate in candidates:
+        try:
+            resp = client.chat.completions.create(model=candidate, **create_kwargs)
+            return candidate, resp
+        except Exception as e:
+            last_err = e
+            if not is_model_not_found(e):
+                break
+    return None, last_err
+
+
 @app.post("/api/chat")
 def chat(body: ChatIn):
     catalog = load_catalog().get("models", [])
     user_content, has_image = build_user_content(body.message, body.attachments)
-    model_id, chosen_tag = choose_model(catalog, body.message, has_image, body.agent_mode, body.model)
+    candidates, chosen_tag = choose_candidates(catalog, body.message, has_image, body.agent_mode, body.model)
 
-    if not model_id:
+    if not candidates:
         return JSONResponse(
             {"error": "Katalogda hiç model yok. Önce Ayarlar'dan API key gir."}, status_code=400
         )
@@ -157,16 +182,15 @@ def chat(body: ChatIn):
                 {"role": "user", "content": user_content}]
 
     def error_stream(msg: str):
-        yield sse("meta", {"model": model_id, "tag": chosen_tag})
+        yield sse("meta", {"tag": chosen_tag, "tried": candidates})
         yield sse("error", {"error": msg})
 
     if body.agent_mode:
-        try:
-            first = client.chat.completions.create(
-                model=model_id, messages=messages, tools=TOOLS, tool_choice="auto"
-            )
-        except Exception as e:
-            return StreamingResponse(error_stream(str(e)), media_type="text/event-stream")
+        model_id, first = try_candidates(
+            client, candidates, {"messages": messages, "tools": TOOLS, "tool_choice": "auto"}
+        )
+        if model_id is None:
+            return StreamingResponse(error_stream(str(first)), media_type="text/event-stream")
 
         choice = first.choices[0]
         tool_calls = choice.message.tool_calls or []
@@ -182,7 +206,10 @@ def chat(body: ChatIn):
                 final = client.chat.completions.create(model=model_id, messages=messages)
                 answer = final.choices[0].message.content or ""
             except Exception as e:
-                return StreamingResponse(error_stream(str(e)), media_type="text/event-stream")
+                def failed_stream():
+                    yield sse("meta", {"model": model_id, "tag": chosen_tag})
+                    yield sse("error", {"error": str(e)})
+                return StreamingResponse(failed_stream(), media_type="text/event-stream")
         else:
             answer = choice.message.content or ""
 
@@ -194,9 +221,14 @@ def chat(body: ChatIn):
         return StreamingResponse(agent_stream(), media_type="text/event-stream")
 
     def token_stream():
+        model_id, stream = try_candidates(client, candidates, {"messages": messages, "stream": True})
+        if model_id is None:
+            yield sse("meta", {"tag": chosen_tag, "tried": candidates})
+            yield sse("error", {"error": str(stream)})
+            return
+
         yield sse("meta", {"model": model_id, "tag": chosen_tag})
         try:
-            stream = client.chat.completions.create(model=model_id, messages=messages, stream=True)
             for chunk in stream:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:

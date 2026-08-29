@@ -41,6 +41,20 @@ FALLBACK_CATALOG = [
     {"id": "zhipuai/glm-5.1", "tags": ["general"]},
 ]
 
+# NVIDIA'nın /v1/models listesi yüzlerce kayıt döndürüyor ama bunların bir
+# kısmı hesapta gerçek bir çalışan "function" olarak deploy edilmemiş —
+# çağrılınca 404 "Function ... Not found for account" hatası veriyor.
+# Bu liste, o etikette önce denenecek bilinen-iyi adayları öne alır; asıl
+# güvenlik ağı app.py'deki 404-üzerine-sıradakini-dene mantığı.
+PREFERRED_BY_TAG = {
+    "fast": ["deepseek-ai/deepseek-v4-flash", "deepseek-ai/deepseek-v4-pro-0813"],
+    "code": ["minimaxai/minimax-m3"],
+    "reasoning": ["qwen/qwen3.5-397b-a17b"],
+    "agent": ["moonshotai/kimi-k2.6", "moonshotai/kimi-k3"],
+    "general": ["zhipuai/glm-5.1", "meta/llama-3.3-70b-instruct"],
+    "vision": ["meta/llama-3.2-90b-vision-instruct", "microsoft/phi-3.5-vision-instruct"],
+}
+
 
 def tag_model(model_id: str) -> list:
     lower = model_id.lower()

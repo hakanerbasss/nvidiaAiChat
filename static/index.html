@@ -8,7 +8,8 @@
 </head>
 <body>
 <div class="app">
-  <aside class="sidebar">
+  <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <span class="brand-badge">N</span>
       <div>
@@ -35,6 +36,11 @@
   </aside>
 
   <main class="chat-col">
+    <div class="mobile-topbar">
+      <button type="button" id="menuToggle" class="icon-btn" aria-label="Menü">☰</button>
+      <span class="mobile-title">NVIDIA AI Chat</span>
+    </div>
+
     <div id="messages" class="messages"></div>
 
     <div id="attachmentTray" class="attachment-tray"></div>
@@ -42,7 +48,7 @@
     <form id="chatForm" class="composer">
       <input type="file" id="fileInput" hidden multiple />
       <button type="button" id="attachBtn" class="icon-btn" title="Dosya / görsel ekle">📎</button>
-      <textarea id="messageInput" placeholder="Bir soru sor, kod iste, görsel yükle…" rows="1"></textarea>
+      <textarea id="messageInput" placeholder="Mesaj yaz…" rows="1"></textarea>
       <button type="submit" class="send-btn">Gönder</button>
     </form>
   </main>

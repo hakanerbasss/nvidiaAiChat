@@ -1,5 +1,7 @@
 import re
 
+from catalog import PREFERRED_BY_TAG
+
 CODE_HINTS = re.compile(
     r"(kod\b|fonksiyon|python|javascript|typescript|\bhtml\b|\bcss\b|\bsql\b|\bbug\b|"
     r"hata ayıkla|refactor|script yaz|def |class |```|api yaz|uygulama yaz)",
@@ -27,18 +29,36 @@ def pick_tag(message: str, has_image: bool, agent_mode: bool) -> str:
     return "fast"
 
 
-def choose_model(catalog_models: list, message: str, has_image: bool, agent_mode: bool, manual_model: str = "auto"):
-    """Returns (model_id, tag_used). manual_model overrides auto-routing."""
+def choose_candidates(
+    catalog_models: list,
+    message: str,
+    has_image: bool,
+    agent_mode: bool,
+    manual_model: str = "auto",
+    max_candidates: int = 5,
+):
+    """Returns (candidate_model_ids, tag_used).
+
+    manual_model verilmişse sadece o modeli döner (kullanıcının açık seçimini
+    sessizce değiştirmiyoruz). "auto" modda ise aynı etiketteki birden fazla
+    model adayı döner — ilk aday hesapta gerçekten çalışmıyorsa (404) çağıran
+    taraf sıradakini dener.
+    """
     if manual_model and manual_model != "auto":
-        return manual_model, "manuel"
+        return [manual_model], "manuel"
 
     tag = pick_tag(message, has_image, agent_mode)
-    candidates = [m for m in catalog_models if tag in m.get("tags", [])]
+    tagged = [m["id"] for m in catalog_models if tag in m.get("tags", [])]
 
-    if not candidates:
+    if not tagged:
         # İstenen yetenekte model yoksa (örn. katalogda hiç vision modeli yok)
-        # genel amaçlı bir modele düş, sessizce hatasız devam et.
-        candidates = [m for m in catalog_models if "general" in m.get("tags", [])] or catalog_models
+        # genel amaçlı modellere düş, sessizce hatasız devam et.
+        tag = "general"
+        tagged = [m["id"] for m in catalog_models if "general" in m.get("tags", [])] or [
+            m["id"] for m in catalog_models
+        ]
 
-    chosen = candidates[0]["id"] if candidates else None
-    return chosen, tag
+    preferred = [mid for mid in PREFERRED_BY_TAG.get(tag, []) if mid in tagged]
+    rest = [mid for mid in tagged if mid not in preferred]
+    candidates = (preferred + rest)[:max_candidates]
+    return candidates, tag

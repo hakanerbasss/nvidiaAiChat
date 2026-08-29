@@ -18,13 +18,19 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+  overscroll-behavior: none;
 }
 
 .app {
   display: grid;
   grid-template-columns: 280px 1fr;
   height: 100vh;
+  height: 100dvh;
 }
+
+.sidebar-backdrop { display: none; }
+
+.mobile-topbar { display: none; }
 
 .sidebar {
   background: var(--panel);
@@ -204,3 +210,53 @@ textarea {
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 .error-text { color: var(--danger); }
+
+/* --- Mobil (telefon genişliği) --- */
+@media (max-width: 860px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 84vw;
+    max-width: 320px;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0,0,0,0.4);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 35;
+  }
+  .sidebar-backdrop.show { display: block; }
+
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .mobile-title { font-weight: 600; font-size: 14px; }
+
+  .chat-col { height: calc(100vh - 0px); height: calc(100dvh - 0px); }
+
+  .messages { padding: 14px; gap: 12px; }
+  .msg { max-width: 90%; }
+  .msg-bubble { font-size: 13.5px; padding: 9px 12px; }
+
+  .attachment-tray { padding: 0 14px; }
+
+  .composer { padding: 10px 12px 14px; gap: 6px; }
+  .icon-btn { width: 36px; height: 36px; font-size: 15px; }
+  .send-btn { padding: 10px 14px; }
+  textarea { font-size: 16px; } /* iOS'ta 16px altı zoom tetikler */
+}
