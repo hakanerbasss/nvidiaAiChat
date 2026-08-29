@@ -49,40 +49,55 @@ def _match_families(live_ids: list) -> list:
     return matches
 
 
-def _probe_model(client, model_id: str) -> bool:
-    """Modelin hesapta gerçekten çağrılabilir olup olmadığını tek, ucuz bir
-    istekle doğrular (404 -> deploy edilmemiş, sessizce elenir). Kısa bir
-    timeout ile: bu fonksiyon paralel çağrılıyor, tek bir yavaş model tüm
-    yenilemeyi Cloudflare'ın ~100sn kenar zaman aşımının üstüne çıkarmasın."""
-    try:
-        client.chat.completions.create(
-            model=model_id,
-            messages=[{"role": "user", "content": "merhaba"}],
-            max_tokens=1,
-            timeout=12,
-        )
-        return True
-    except Exception:
-        return False
+def _probe_model(client, model_id: str) -> tuple:
+    """Modelin hesapta gerçekten çağrılabilir olup olmadığını doğrular.
+    429 (hız sınırı) alırsa kısa bir bekleyip bir kez daha dener — paralel
+    çalıştığımız için başka bir model bu isteği tetiklemiş olabilir.
+    (ok: bool, error_str: str|None) döner."""
+    for attempt in range(2):
+        try:
+            client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": "merhaba"}],
+                max_tokens=1,
+                timeout=12,
+            )
+            return True, None
+        except Exception as e:
+            err = str(e)
+            is_rate_limited = getattr(e, "status_code", None) == 429 or "429" in err
+            if is_rate_limited and attempt == 0:
+                time.sleep(2)
+                continue
+            return False, err[:300]
+    return False, "bilinmeyen hata"
 
 
 def refresh_catalog() -> dict:
     """NVIDIA'nın gerçek /v1/models listesini çeker, bilinen ailelerle eşleştirir
     ve her adayı PARALEL olarak gerçekten çağırarak doğrular (sıralı denemek
     10 model x 12-20sn ile Cloudflare'ın kenar zaman aşımını aşıyordu). Sadece
-    çalışan modeller kaydedilir."""
+    çalışan modeller kaydedilir; elenenlerin hata mesajı diagnostics'e yazılır
+    (/api/models yanıtında görülebilir — 404 mü, 429 hız sınırı mı, başka mı)."""
     client = get_client()
     resp = client.models.list()
     live_ids = [m.id for m in resp.data]
     matches = _match_families(live_ids)
 
     verified = []
+    diagnostics = {}
     if matches:
-        with ThreadPoolExecutor(max_workers=len(matches)) as pool:
+        # Cok fazla ayni anda tetiklenirse NVIDIA'nin hiz sinirina takilma
+        # ihtimalini azaltmak icin es zamanliligi sinirla.
+        with ThreadPoolExecutor(max_workers=min(4, len(matches))) as pool:
             future_to_match = {pool.submit(_probe_model, client, m["id"]): m for m in matches}
             for future in as_completed(future_to_match):
-                if future.result():
-                    verified.append(future_to_match[future])
+                m = future_to_match[future]
+                ok, err = future.result()
+                if ok:
+                    verified.append(m)
+                else:
+                    diagnostics[m["id"]] = err
     verified.sort(key=lambda m: m["id"])
     final = verified or matches  # hiçbiri doğrulanamazsa en azından eşleşenleri göster
 
@@ -92,6 +107,7 @@ def refresh_catalog() -> dict:
         "is_fallback": False,
         "verified": bool(verified),
         "raw_count": len(live_ids),
+        "diagnostics": diagnostics,
     }
     CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     return payload
