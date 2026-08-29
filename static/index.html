@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>NVIDIA AI Chat</title>
-<link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/style.css?v=3" />
 </head>
 <body>
 <div class="app">
@@ -16,7 +16,13 @@
         <div class="brand-title">NVIDIA AI Chat</div>
         <div class="brand-sub" id="statusText">bağlantı kontrol ediliyor…</div>
       </div>
+      <button type="button" id="themeToggle" class="icon-btn theme-btn" title="Aydınlık/karanlık mod">🌙</button>
     </div>
+
+    <button type="button" id="newChatBtn" class="new-chat-btn">+ Yeni sohbet</button>
+    <div id="conversationList" class="conversation-list"></div>
+
+    <hr class="sidebar-sep" />
 
     <label class="field-label" for="modelSelect">Model</label>
     <select id="modelSelect"></select>
@@ -26,6 +32,11 @@
       <input type="checkbox" id="agentMode" />
       <span>Ajan modu (araç çağırabilir)</span>
     </label>
+    <div class="muted hint-text">
+      Açıkken model tarih/saat gibi araçları kendi kendine çağırabilir; cevap
+      token token değil tek parça gelir. Yeni araç eklemek için
+      <code>tools.py</code>.
+    </div>
 
     <div class="catalog-box">
       <div class="field-label">Katalog</div>
@@ -38,7 +49,7 @@
   <main class="chat-col">
     <div class="mobile-topbar">
       <button type="button" id="menuToggle" class="icon-btn" aria-label="Menü">☰</button>
-      <span class="mobile-title">NVIDIA AI Chat</span>
+      <span class="mobile-title" id="mobileTitle">NVIDIA AI Chat</span>
     </div>
 
     <div id="messages" class="messages"></div>
@@ -72,6 +83,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>

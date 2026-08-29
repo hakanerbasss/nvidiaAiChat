@@ -10,6 +10,23 @@
   --danger: #e5534b;
 }
 
+:root[data-theme="light"] {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --border: #d7dde4;
+  --text: #14181d;
+  --muted: #5b6672;
+  --accent: #4f7a00;
+  --accent-dim: #6fa300;
+  --danger: #c2372f;
+}
+:root[data-theme="light"] .send-btn,
+:root[data-theme="light"] .msg.user .msg-bubble,
+:root[data-theme="light"] .brand-badge {
+  color: #f4fff0;
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -19,6 +36,7 @@ html, body {
   color: var(--text);
   font-family: -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
   overscroll-behavior: none;
+  overflow-x: hidden;
 }
 
 .app {
@@ -42,15 +60,75 @@ html, body {
   overflow-y: auto;
 }
 
-.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .brand-badge {
   width: 32px; height: 32px; border-radius: 8px;
   background: var(--accent); color: #06210a;
   display: flex; align-items: center; justify-content: center;
   font-weight: 700;
+  flex-shrink: 0;
 }
 .brand-title { font-weight: 600; font-size: 14px; }
 .brand-sub { font-size: 11px; color: var(--muted); }
+.theme-btn { margin-left: auto; width: 32px; height: 32px; font-size: 14px; flex-shrink: 0; }
+
+.new-chat-btn {
+  background: var(--accent);
+  color: #06210a;
+  border: none;
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+.new-chat-btn:hover { background: var(--accent-dim); }
+
+.conversation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.conversation-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+  border: 1px solid transparent;
+}
+.conversation-item:hover { background: var(--panel-2); }
+.conversation-item.active { background: var(--panel-2); border-color: var(--accent); }
+.conversation-item .title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-item input.title-edit {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 12.5px;
+  width: 100%;
+}
+.conversation-item .conv-actions { display: flex; gap: 2px; }
+.conversation-item .conv-actions button {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 4px;
+}
+.conversation-item .conv-actions button:hover { color: var(--text); background: var(--border); }
+
+.sidebar-sep { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
+.hint-text { line-height: 1.4; margin-top: -4px; }
 
 .field-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
@@ -219,7 +297,9 @@ textarea {
 
   .sidebar {
     position: fixed;
-    inset: 0 auto 0 0;
+    top: 0;
+    left: 0;
+    bottom: 0;
     width: 84vw;
     max-width: 320px;
     z-index: 40;
@@ -231,7 +311,10 @@ textarea {
 
   .sidebar-backdrop {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     background: rgba(0,0,0,0.55);
     z-index: 35;
   }
