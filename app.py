@@ -1,6 +1,9 @@
+import asyncio
 import base64
 import io
 import json
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -157,26 +160,55 @@ def is_retryable_failure(e: Exception) -> bool:
     return "error code: 404" in text or "'status': 404" in text or "timeout" in text or "timed out" in text
 
 
-def try_candidates(client, candidates, create_kwargs):
-    """Aday model id'lerini sırayla dener, 404/zaman aşımında bir sonrakine
-    geçer. (used_model, response) veya modelin hepsi başarısızsa
-    (None, last_error) döner."""
-    last_err = None
-    for candidate in candidates:
+KEEPALIVE_SECONDS = 15  # Cloudflare'in ~100sn kenar zaman aşımını asla riske atmayacak sıklık
+
+
+def _blocking_worker(fn, q: "queue.Queue"):
+    try:
+        q.put(("end", fn()))
+    except Exception as e:
+        q.put(("error", e))
+
+
+def _stream_worker(fn, q: "queue.Queue"):
+    """fn() bir OpenAI stream objesi döner; her parçayı kuyruğa koyar."""
+    try:
+        for chunk in fn():
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                q.put(("delta", delta))
+        q.put(("end", None))
+    except Exception as e:
+        q.put(("error", e))
+
+
+async def _drain_with_keepalive(q: "queue.Queue"):
+    """Kuyruktaki öğeleri async olarak sırayla verir; kuyruk KEEPALIVE_SECONDS
+    boyunca boşsa ("ping", None) döner ki Cloudflare/nginx bağlantıyı sessiz
+    sanıp erken kesmesin. ("end"|"error", ...) gelince durur."""
+    while True:
         try:
-            resp = client.chat.completions.create(
-                model=candidate, timeout=REQUEST_TIMEOUT, **create_kwargs
-            )
-            return candidate, resp
-        except Exception as e:
-            last_err = e
-            if not is_retryable_failure(e):
-                break
-    return None, last_err
+            kind, payload = await asyncio.to_thread(q.get, True, KEEPALIVE_SECONDS)
+        except queue.Empty:
+            yield "ping", None
+            continue
+        yield kind, payload
+        if kind in ("end", "error"):
+            return
+
+
+async def call_with_keepalive(fn):
+    """fn'yi arka planda bir thread'de çalıştırır; bekleme sırasında
+    ("ping", None) üretir, sonunda tam olarak bir kez ("end", result) veya
+    ("error", exc) üretir."""
+    q: "queue.Queue" = queue.Queue()
+    threading.Thread(target=_blocking_worker, args=(fn, q), daemon=True).start()
+    async for kind, payload in _drain_with_keepalive(q):
+        yield kind, payload
 
 
 @app.post("/api/chat")
-def chat(body: ChatIn):
+async def chat(body: ChatIn):
     catalog = load_catalog().get("models", [])
     label_by_id = {m["id"]: m.get("label", m["id"]) for m in catalog}
     user_content, has_image = build_user_content(body.message, body.attachments)
@@ -195,39 +227,63 @@ def chat(body: ChatIn):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, *body.history,
                 {"role": "user", "content": user_content}]
 
-    def error_stream(msg: str):
-        yield sse("meta", {"tag": chosen_tag, "tried": candidates})
-        yield sse("error", {"error": msg})
-
     if body.agent_mode:
-        model_id, first = try_candidates(
-            client, candidates, {"messages": messages, "tools": TOOLS, "tool_choice": "auto"}
-        )
-        if model_id is None:
-            return StreamingResponse(error_stream(str(first)), media_type="text/event-stream")
+        async def agent_stream():
+            model_id, first, last_err = None, None, None
+            for candidate in candidates:
+                call = (lambda c=candidate: client.chat.completions.create(
+                    model=c, messages=messages, tools=TOOLS, tool_choice="auto", timeout=REQUEST_TIMEOUT
+                ))
+                result, err = None, None
+                async for kind, payload in call_with_keepalive(call):
+                    if kind == "ping":
+                        yield sse(None, {})
+                        continue
+                    if kind == "end":
+                        result = payload
+                    else:
+                        err = payload
+                if result is not None:
+                    model_id, first = candidate, result
+                    break
+                last_err = err
+                if not is_retryable_failure(err):
+                    break
 
-        choice = first.choices[0]
-        tool_calls = choice.message.tool_calls or []
-        tools_used = [c.function.name for c in tool_calls]
+            if model_id is None:
+                yield sse("meta", {"tag": chosen_tag, "tried": candidates})
+                yield sse("error", {"error": str(last_err)})
+                return
 
-        if tool_calls:
-            messages.append(choice.message.model_dump())
-            for call in tool_calls:
-                args = json.loads(call.function.arguments or "{}")
-                result = execute_tool(call.function.name, args)
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
-            try:
-                final = client.chat.completions.create(model=model_id, messages=messages)
-                answer = final.choices[0].message.content or ""
-            except Exception as e:
-                def failed_stream():
-                    yield sse("meta", {"model": model_id, "tag": chosen_tag})
-                    yield sse("error", {"error": str(e)})
-                return StreamingResponse(failed_stream(), media_type="text/event-stream")
-        else:
+            choice = first.choices[0]
+            tool_calls = choice.message.tool_calls or []
+            tools_used = [c.function.name for c in tool_calls]
+
             answer = choice.message.content or ""
+            if tool_calls:
+                messages.append(choice.message.model_dump())
+                for call in tool_calls:
+                    args = json.loads(call.function.arguments or "{}")
+                    tool_result = execute_tool(call.function.name, args)
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": tool_result})
 
-        def agent_stream():
+                final, ferr = None, None
+                async for kind, payload in call_with_keepalive(
+                    lambda: client.chat.completions.create(model=model_id, messages=messages, timeout=REQUEST_TIMEOUT)
+                ):
+                    if kind == "ping":
+                        yield sse(None, {})
+                        continue
+                    if kind == "end":
+                        final = payload
+                    else:
+                        ferr = payload
+                if final is None:
+                    yield sse("meta", {"model": model_id, "label": label_by_id.get(model_id, model_id), "tag": chosen_tag})
+                    yield sse("error", {"error": str(ferr)})
+                    return
+                answer = final.choices[0].message.content or ""
+
             yield sse("meta", {
                 "model": model_id, "label": label_by_id.get(model_id, model_id),
                 "tag": chosen_tag, "tools_used": tools_used,
@@ -237,46 +293,46 @@ def chat(body: ChatIn):
 
         return StreamingResponse(agent_stream(), media_type="text/event-stream")
 
-    def token_stream():
+    async def token_stream():
         last_err = None
         for candidate in candidates:
-            try:
-                stream = client.chat.completions.create(
-                    model=candidate, messages=messages, stream=True, timeout=REQUEST_TIMEOUT
-                )
-            except Exception as e:
-                last_err = e
-                if is_retryable_failure(e):
-                    continue
-                yield sse("meta", {"tag": chosen_tag, "tried": candidates})
-                yield sse("error", {"error": str(e)})
-                return
+            call = (lambda c=candidate: client.chat.completions.create(
+                model=c, messages=messages, stream=True, timeout=REQUEST_TIMEOUT
+            ))
+            q: "queue.Queue" = queue.Queue()
+            threading.Thread(target=_stream_worker, args=(call, q), daemon=True).start()
 
             got_content = False
             start = time.monotonic()
-            try:
-                for chunk in stream:
+            candidate_err = None
+            async for kind, payload in _drain_with_keepalive(q):
+                if kind == "ping":
                     if not got_content and time.monotonic() - start > FIRST_TOKEN_GRACE:
-                        last_err = RuntimeError(f"{candidate}: {FIRST_TOKEN_GRACE}s içinde içerik gelmedi")
+                        candidate_err = RuntimeError(f"{candidate}: {FIRST_TOKEN_GRACE}s içinde içerik gelmedi")
                         break
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
-                    if delta:
-                        if not got_content:
-                            got_content = True
-                            yield sse("meta", {
-                                "model": candidate, "label": label_by_id.get(candidate, candidate),
-                                "tag": chosen_tag,
-                            })
-                        yield sse(None, {"delta": delta})
-            except Exception as e:
-                if got_content:
-                    yield sse("error", {"error": str(e)})
-                    return
-                last_err = e
+                    yield sse(None, {})
+                    continue
+                if kind == "delta":
+                    if not got_content:
+                        got_content = True
+                        yield sse("meta", {
+                            "model": candidate, "label": label_by_id.get(candidate, candidate),
+                            "tag": chosen_tag,
+                        })
+                    yield sse(None, {"delta": payload})
+                elif kind == "error":
+                    candidate_err = payload
+                    if got_content:
+                        yield sse("error", {"error": str(payload)})
+                        return
+                    break
+                elif kind == "end":
+                    break
 
             if got_content:
                 yield sse("done", {})
                 return
+            last_err = candidate_err or last_err
             # bu aday hic icerik uretmedi (404, zaman asimi, sessiz baglanti) -> sonrakini dene
 
         yield sse("meta", {"tag": chosen_tag, "tried": candidates})

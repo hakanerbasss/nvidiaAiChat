@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from nvidia_client import CACHE_PATH, get_client
 
@@ -50,13 +51,15 @@ def _match_families(live_ids: list) -> list:
 
 def _probe_model(client, model_id: str) -> bool:
     """Modelin hesapta gerçekten çağrılabilir olup olmadığını tek, ucuz bir
-    istekle doğrular (404 -> deploy edilmemiş, sessizce elenir)."""
+    istekle doğrular (404 -> deploy edilmemiş, sessizce elenir). Kısa bir
+    timeout ile: bu fonksiyon paralel çağrılıyor, tek bir yavaş model tüm
+    yenilemeyi Cloudflare'ın ~100sn kenar zaman aşımının üstüne çıkarmasın."""
     try:
         client.chat.completions.create(
             model=model_id,
             messages=[{"role": "user", "content": "merhaba"}],
             max_tokens=1,
-            timeout=20,
+            timeout=12,
         )
         return True
     except Exception:
@@ -65,13 +68,22 @@ def _probe_model(client, model_id: str) -> bool:
 
 def refresh_catalog() -> dict:
     """NVIDIA'nın gerçek /v1/models listesini çeker, bilinen ailelerle eşleştirir
-    ve her adayı gerçekten çağırarak doğrular. Sadece çalışan modeller kaydedilir."""
+    ve her adayı PARALEL olarak gerçekten çağırarak doğrular (sıralı denemek
+    10 model x 12-20sn ile Cloudflare'ın kenar zaman aşımını aşıyordu). Sadece
+    çalışan modeller kaydedilir."""
     client = get_client()
     resp = client.models.list()
     live_ids = [m.id for m in resp.data]
     matches = _match_families(live_ids)
 
-    verified = [m for m in matches if _probe_model(client, m["id"])]
+    verified = []
+    if matches:
+        with ThreadPoolExecutor(max_workers=len(matches)) as pool:
+            future_to_match = {pool.submit(_probe_model, client, m["id"]): m for m in matches}
+            for future in as_completed(future_to_match):
+                if future.result():
+                    verified.append(future_to_match[future])
+    verified.sort(key=lambda m: m["id"])
     final = verified or matches  # hiçbiri doğrulanamazsa en azından eşleşenleri göster
 
     payload = {
