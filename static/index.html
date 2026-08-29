@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NVIDIA AI Chat</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-badge">N</span>
+      <div>
+        <div class="brand-title">NVIDIA AI Chat</div>
+        <div class="brand-sub" id="statusText">bağlantı kontrol ediliyor…</div>
+      </div>
+    </div>
+
+    <label class="field-label" for="modelSelect">Model</label>
+    <select id="modelSelect"></select>
+    <button class="ghost-btn" id="refreshModels">Kataloğu yenile</button>
+
+    <label class="toggle-row">
+      <input type="checkbox" id="agentMode" />
+      <span>Ajan modu (araç çağırabilir)</span>
+    </label>
+
+    <div class="catalog-box">
+      <div class="field-label">Katalog</div>
+      <div id="catalogList" class="catalog-list"></div>
+    </div>
+
+    <button class="ghost-btn" id="openSettings">⚙ Ayarlar</button>
+  </aside>
+
+  <main class="chat-col">
+    <div id="messages" class="messages"></div>
+
+    <div id="attachmentTray" class="attachment-tray"></div>
+
+    <form id="chatForm" class="composer">
+      <input type="file" id="fileInput" hidden multiple />
+      <button type="button" id="attachBtn" class="icon-btn" title="Dosya / görsel ekle">📎</button>
+      <textarea id="messageInput" placeholder="Bir soru sor, kod iste, görsel yükle…" rows="1"></textarea>
+      <button type="submit" class="send-btn">Gönder</button>
+    </form>
+  </main>
+</div>
+
+<div id="settingsModal" class="modal hidden">
+  <div class="modal-card">
+    <h2>NVIDIA API Ayarları</h2>
+    <p class="muted">
+      API key almak için <strong>build.nvidia.com</strong> adresine gidip ücretsiz hesap
+      oluştur ve bir NVAPI key üret. Anahtar sadece sunucuda, <code>settings.json</code>
+      içinde saklanır.
+    </p>
+    <label class="field-label" for="apiKeyInput">NVIDIA API Key</label>
+    <input type="password" id="apiKeyInput" placeholder="nvapi-..." autocomplete="off" />
+    <div class="modal-actions">
+      <button type="button" id="closeSettings" class="ghost-btn">Kapat</button>
+      <button type="button" id="saveSettings" class="send-btn">Kaydet</button>
+    </div>
+    <div id="settingsMsg" class="muted"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

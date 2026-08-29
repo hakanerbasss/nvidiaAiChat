@@ -1,0 +1,13 @@
+[Unit]
+Description=nvidiaAiChat - NVIDIA NIM tabanli chat uygulamasi
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/nvidiaaichat
+ExecStart=/root/nvidiaaichat/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8010
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
