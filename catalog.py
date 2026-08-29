@@ -49,35 +49,45 @@ def _match_families(live_ids: list) -> list:
     return matches
 
 
+PROBE_ATTEMPTS = 3
+PROBE_TIMEOUT = 20
+
+
 def _probe_model(client, model_id: str) -> tuple:
     """Modelin hesapta gerçekten çağrılabilir olup olmadığını doğrular.
-    429 (hız sınırı) alırsa kısa bir bekleyip bir kez daha dener — paralel
-    çalıştığımız için başka bir model bu isteği tetiklemiş olabilir.
-    (ok: bool, error_str: str|None) döner."""
-    for attempt in range(2):
+    429 (hız sınırı) veya zaman aşımı geçici olabilir — paralel çalıştığımız
+    için başka bir model bu isteği tetiklemiş olabilir; ikisinde de artan
+    bir bekleme ile birkaç kez dener. Sadece 404 (gerçekten deploy edilmemiş)
+    hemen kesin sayılır. (ok: bool, error_str: str|None) döner."""
+    last_err = "bilinmeyen hata"
+    for attempt in range(PROBE_ATTEMPTS):
         try:
             client.chat.completions.create(
                 model=model_id,
                 messages=[{"role": "user", "content": "merhaba"}],
                 max_tokens=1,
-                timeout=12,
+                timeout=PROBE_TIMEOUT,
             )
             return True, None
         except Exception as e:
             err = str(e)
-            is_rate_limited = getattr(e, "status_code", None) == 429 or "429" in err
-            if is_rate_limited and attempt == 0:
-                time.sleep(2)
-                continue
-            return False, err[:300]
-    return False, "bilinmeyen hata"
+            last_err = err[:300]
+            is_404 = getattr(e, "status_code", None) == 404 or "404" in err
+            if is_404:
+                return False, last_err  # kalici hata, tekrar denemeye gerek yok
+            if attempt < PROBE_ATTEMPTS - 1:
+                time.sleep(2 + attempt * 2)  # 2sn, sonra 4sn
+    return False, last_err
 
 
 def refresh_catalog() -> dict:
     """NVIDIA'nın gerçek /v1/models listesini çeker, bilinen ailelerle eşleştirir
-    ve her adayı PARALEL olarak gerçekten çağırarak doğrular (sıralı denemek
-    10 model x 12-20sn ile Cloudflare'ın kenar zaman aşımını aşıyordu). Sadece
-    çalışan modeller kaydedilir; elenenlerin hata mesajı diagnostics'e yazılır
+    ve her adayı PARALEL olarak gerçekten çağırarak doğrular. Bu fonksiyon
+    birkaç dakika sürebilir (429/zaman aşımında yeniden deniyor) — çağıran taraf
+    (app.py /api/models/refresh) bunu arka plan thread'inde çalıştırıp periyodik
+    "nabız" göndererek Cloudflare'ın bağlantıyı erken kesmesini engelliyor, o
+    yüzden burada süre konusunda cimri davranmaya gerek yok. Sadece çalışan
+    modeller kaydedilir; elenenlerin hata mesajı diagnostics'e yazılır
     (/api/models yanıtında görülebilir — 404 mü, 429 hız sınırı mı, başka mı)."""
     client = get_client()
     resp = client.models.list()
@@ -89,7 +99,7 @@ def refresh_catalog() -> dict:
     if matches:
         # Cok fazla ayni anda tetiklenirse NVIDIA'nin hiz sinirina takilma
         # ihtimalini azaltmak icin es zamanliligi sinirla.
-        with ThreadPoolExecutor(max_workers=min(4, len(matches))) as pool:
+        with ThreadPoolExecutor(max_workers=min(5, len(matches))) as pool:
             future_to_match = {pool.submit(_probe_model, client, m["id"]): m for m in matches}
             for future in as_completed(future_to_match):
                 m = future_to_match[future]

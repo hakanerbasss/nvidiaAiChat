@@ -57,12 +57,11 @@ def update_settings(body: SettingsIn):
     if not key:
         return JSONResponse({"error": "API key boş olamaz."}, status_code=400)
     save_settings(key)
-    try:
-        refresh_catalog()
-        refreshed = True
-    except Exception:
-        refreshed = False
-    return {"ok": True, "catalog_refreshed": refreshed}
+    # Katalog yenileme birkaç dakika sürebilir (bkz. /api/models/refresh) — bu
+    # düz JSON uç noktasını Cloudflare'ın zaman aşımına karşı savunmasız
+    # bırakmamak için burada tetiklemiyoruz; istemci kaydettikten hemen sonra
+    # ayrıca /api/models/refresh'i (SSE tabanlı, nabızlı) çağırıyor.
+    return {"ok": True}
 
 
 @app.get("/api/models")
@@ -71,11 +70,23 @@ def get_models():
 
 
 @app.post("/api/models/refresh")
-def post_refresh_models():
-    try:
-        return {"ok": True, **refresh_catalog()}
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+async def post_refresh_models():
+    async def stream():
+        result, err = None, None
+        async for kind, payload in call_with_keepalive(refresh_catalog):
+            if kind == "ping":
+                yield sse(None, {})
+                continue
+            if kind == "end":
+                result = payload
+            else:
+                err = payload
+        if result is not None:
+            yield sse("result", {"ok": True, **result})
+        else:
+            yield sse("result", {"ok": False, "error": str(err)})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.post("/api/upload")
