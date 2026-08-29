@@ -52,8 +52,15 @@ def choose_candidates(
         # İstenen yetenekte model yoksa (örn. katalogda hiç vision modeli yok)
         # genel amaçlı modellere düş, sessizce hatasız devam et.
         tag = "general"
-        tagged = [m["id"] for m in catalog_models if "general" in m.get("tags", [])] or [
-            m["id"] for m in catalog_models
-        ]
+        tagged = [m["id"] for m in catalog_models if "general" in m.get("tags", [])]
+
+    if not tagged:
+        # Küratörlü katalog o an çok küçükse (bazı modeller doğrulanamamış
+        # olabilir) elde ne varsa kullan — ama görsel amaçlı model varsa,
+        # görsel yokken onu en sona at (düz bir "merhaba" boşuna vision
+        # modeline gitmesin).
+        non_vision = [m["id"] for m in catalog_models if "vision" not in m.get("tags", [])]
+        vision_only = [m["id"] for m in catalog_models if "vision" in m.get("tags", [])]
+        tagged = non_vision + vision_only if not has_image else vision_only + non_vision
 
     return tagged[:max_candidates], tag
