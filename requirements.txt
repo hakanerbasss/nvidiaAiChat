@@ -1,5 +1,6 @@
 fastapi>=0.111
 uvicorn[standard]>=0.30
 openai>=1.30
+httpx2
 pypdf>=4.2
 python-multipart>=0.0.9

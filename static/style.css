@@ -168,7 +168,11 @@ select, input[type="password"], input[type="text"] {
   padding: 6px 8px;
   font-size: 12px;
 }
-.catalog-item .id { font-family: ui-monospace, monospace; word-break: break-all; }
+.catalog-item .label { font-weight: 600; margin-bottom: 2px; }
+.catalog-item .id {
+  font-family: ui-monospace, monospace; word-break: break-all;
+  font-size: 10.5px; color: var(--muted);
+}
 .catalog-item .tags { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
 .tag-pill {
   font-size: 10px; padding: 2px 6px; border-radius: 999px;
@@ -194,6 +198,21 @@ select, input[type="password"], input[type="text"] {
 .msg.user .msg-bubble { background: var(--accent-dim); color: #06210a; }
 .msg.assistant .msg-bubble { background: var(--panel-2); border: 1px solid var(--border); }
 .msg-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+.typing-dots { display: inline-flex; gap: 4px; padding: 2px 0; }
+.typing-dots span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted);
+  animation: typingBounce 1s infinite ease-in-out;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typingBounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+
+.retry-btn { margin-top: 6px; font-size: 12px; padding: 6px 10px; }
 
 .msg-bubble pre {
   background: #060a0f;

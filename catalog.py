@@ -3,83 +3,84 @@ import time
 
 from nvidia_client import CACHE_PATH, get_client
 
-# Model ailesi -> yetenek etiketi eşlemesi. Kaynak: kullanıcının build.nvidia.com
-# panelinden aldığı kategori önerileri (hız/DeepSeek, kodlama/MiniMax,
-# akıl yürütme/Qwen, ajan/Kimi). Bilinmeyen aileler "general" etiketiyle döner.
-FAMILY_TAGS = {
-    "deepseek": ["fast"],
-    "minimax": ["code"],
-    "minimaxai": ["code"],
-    "qwen": ["reasoning"],
-    "kimi": ["agent"],
-    "moonshotai": ["agent"],
-    "glm": ["general"],
-    "zhipuai": ["general"],
-    "llama": ["general"],
-    "meta": ["general"],
-    "nemotron": ["general"],
-    "nvidia": ["general"],
-    "mistral": ["general"],
-    "mixtral": ["general"],
-    "phi": ["general"],
-    "microsoft": ["general"],
-    "gemma": ["general"],
-    "google": ["general"],
-}
-
-VISION_HINTS = [
-    "vision", "-vl", "vl-", "vila", "neva", "kosmos", "florence", "paligemma", "llava",
+# Katalogtaki yüzlerce modelin çoğu eski/test modeli ya da hesapta gerçek bir
+# çalışan "function" olarak deploy edilmemiş — çağrılınca 404 veriyor. Kullanıcıyı
+# yüzlerce kriptik id ile boğmak yerine bilinen/popüler aileleri seçip her birini
+# refresh_catalog() sırasında gerçekten çağırarak doğruluyoruz; sadece çalışanlar
+# gösteriliyor. "match": canlı model id'sinde aranacak alt dize (küçük harf).
+CURATED_FAMILIES = [
+    {"match": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash (hızlı)", "tags": ["fast"]},
+    {"match": "deepseek-ai/deepseek-v4-pro", "label": "DeepSeek V4 Pro (güçlü)", "tags": ["reasoning", "general"]},
+    {"match": "minimaxai/minimax-m3", "label": "MiniMax M3 (kodlama)", "tags": ["code"]},
+    {"match": "qwen/qwen3.5", "label": "Qwen 3.5 (akıl yürütme)", "tags": ["reasoning"]},
+    {"match": "moonshotai/kimi-k3", "label": "Kimi K3 (ajan)", "tags": ["agent"]},
+    {"match": "moonshotai/kimi-k2", "label": "Kimi K2 (ajan)", "tags": ["agent"]},
+    {"match": "zhipuai/glm-5", "label": "GLM 5 (genel)", "tags": ["general"]},
+    {"match": "meta/llama-3.2-90b-vision", "label": "Llama 3.2 Vision (görsel analiz)", "tags": ["vision"]},
+    {"match": "meta/llama-3.3-70b-instruct", "label": "Llama 3.3 70B (genel)", "tags": ["general"]},
+    {"match": "mistralai/mistral-large", "label": "Mistral Large (genel)", "tags": ["general"]},
 ]
 
-# API key henüz girilmemişken veya /v1/models erişilemezken gösterilecek örnek
-# liste. Kullanıcının kendi ekran görüntüsündeki gerçek model kimlikleri.
+# API key henüz girilmemişken gösterilecek örnek liste (test edilmemiş).
 FALLBACK_CATALOG = [
-    {"id": "deepseek-ai/deepseek-v4-flash", "tags": ["fast"]},
-    {"id": "minimaxai/minimax-m3", "tags": ["code"]},
-    {"id": "qwen/qwen3.5-397b-a17b", "tags": ["reasoning"]},
-    {"id": "moonshotai/kimi-k2.6", "tags": ["agent"]},
-    {"id": "zhipuai/glm-5.1", "tags": ["general"]},
+    {"id": "deepseek-ai/deepseek-v4-flash", "label": "DeepSeek V4 Flash (hızlı)", "tags": ["fast"]},
+    {"id": "minimaxai/minimax-m3", "label": "MiniMax M3 (kodlama)", "tags": ["code"]},
+    {"id": "qwen/qwen3.5-397b-a17b", "label": "Qwen 3.5 (akıl yürütme)", "tags": ["reasoning"]},
+    {"id": "moonshotai/kimi-k2.6", "label": "Kimi K2.6 (ajan)", "tags": ["agent"]},
+    {"id": "zhipuai/glm-5.1", "label": "GLM 5.1 (genel)", "tags": ["general"]},
 ]
 
-# NVIDIA'nın /v1/models listesi yüzlerce kayıt döndürüyor ama bunların bir
-# kısmı hesapta gerçek bir çalışan "function" olarak deploy edilmemiş —
-# çağrılınca 404 "Function ... Not found for account" hatası veriyor.
-# Bu liste, o etikette önce denenecek bilinen-iyi adayları öne alır; asıl
-# güvenlik ağı app.py'deki 404-üzerine-sıradakini-dene mantığı.
-PREFERRED_BY_TAG = {
-    "fast": ["deepseek-ai/deepseek-v4-flash", "deepseek-ai/deepseek-v4-pro-0813"],
-    "code": ["minimaxai/minimax-m3"],
-    "reasoning": ["qwen/qwen3.5-397b-a17b"],
-    "agent": ["moonshotai/kimi-k2.6", "moonshotai/kimi-k3"],
-    "general": ["zhipuai/glm-5.1", "meta/llama-3.3-70b-instruct"],
-    "vision": ["meta/llama-3.2-90b-vision-instruct", "microsoft/phi-3.5-vision-instruct"],
-}
+
+def _match_families(live_ids: list) -> list:
+    """Canlı /v1/models listesinde CURATED_FAMILIES'teki her aile için en
+    kısa/en sade eşleşen id'yi seçer (örn. 'deepseek-v4-flash-0731' değil de
+    varsa düz 'deepseek-v4-flash')."""
+    used = set()
+    matches = []
+    for fam in CURATED_FAMILIES:
+        candidates = [mid for mid in live_ids if fam["match"] in mid.lower() and mid not in used]
+        if not candidates:
+            continue
+        candidates.sort(key=len)
+        chosen = candidates[0]
+        used.add(chosen)
+        matches.append({"id": chosen, "label": fam["label"], "tags": fam["tags"]})
+    return matches
 
 
-def tag_model(model_id: str) -> list:
-    lower = model_id.lower()
-    tags = set()
-    for key, fam_tags in FAMILY_TAGS.items():
-        if key in lower:
-            tags.update(fam_tags)
-    if any(hint in lower for hint in VISION_HINTS):
-        tags.add("vision")
-    if not tags:
-        tags.add("general")
-    return sorted(tags)
+def _probe_model(client, model_id: str) -> bool:
+    """Modelin hesapta gerçekten çağrılabilir olup olmadığını tek, ucuz bir
+    istekle doğrular (404 -> deploy edilmemiş, sessizce elenir)."""
+    try:
+        client.chat.completions.create(
+            model=model_id,
+            messages=[{"role": "user", "content": "merhaba"}],
+            max_tokens=1,
+            timeout=20,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def refresh_catalog() -> dict:
-    """NVIDIA'nın gerçek /v1/models listesini çeker ve etiketleyip diske yazar.
-
-    Bu, modelleri tahmin etmek yerine kullanıcının kendi API key'iyle o an
-    gerçekten erişilebilir olan katalogdan besleniyor olmayı sağlar.
-    """
+    """NVIDIA'nın gerçek /v1/models listesini çeker, bilinen ailelerle eşleştirir
+    ve her adayı gerçekten çağırarak doğrular. Sadece çalışan modeller kaydedilir."""
     client = get_client()
     resp = client.models.list()
-    models = [{"id": m.id, "tags": tag_model(m.id)} for m in resp.data]
-    models.sort(key=lambda m: m["id"])
-    payload = {"fetched_at": time.time(), "models": models, "is_fallback": False}
+    live_ids = [m.id for m in resp.data]
+    matches = _match_families(live_ids)
+
+    verified = [m for m in matches if _probe_model(client, m["id"])]
+    final = verified or matches  # hiçbiri doğrulanamazsa en azından eşleşenleri göster
+
+    payload = {
+        "fetched_at": time.time(),
+        "models": final,
+        "is_fallback": False,
+        "verified": bool(verified),
+        "raw_count": len(live_ids),
+    }
     CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     return payload
 

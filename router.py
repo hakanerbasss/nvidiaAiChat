@@ -1,7 +1,5 @@
 import re
 
-from catalog import PREFERRED_BY_TAG
-
 CODE_HINTS = re.compile(
     r"(kod\b|fonksiyon|python|javascript|typescript|\bhtml\b|\bcss\b|\bsql\b|\bbug\b|"
     r"hata ayıkla|refactor|script yaz|def |class |```|api yaz|uygulama yaz)",
@@ -40,9 +38,9 @@ def choose_candidates(
     """Returns (candidate_model_ids, tag_used).
 
     manual_model verilmişse sadece o modeli döner (kullanıcının açık seçimini
-    sessizce değiştirmiyoruz). "auto" modda ise aynı etiketteki birden fazla
-    model adayı döner — ilk aday hesapta gerçekten çalışmıyorsa (404) çağıran
-    taraf sıradakini dener.
+    sessizce değiştirmiyoruz). "auto" modda katalog artık zaten doğrulanmış,
+    küçük bir küratörlü liste olduğu için sadece aynı etiketteki modelleri
+    sırayla döneriz — app.py yine de 404 ihtimaline karşı sıradakini dener.
     """
     if manual_model and manual_model != "auto":
         return [manual_model], "manuel"
@@ -58,7 +56,4 @@ def choose_candidates(
             m["id"] for m in catalog_models
         ]
 
-    preferred = [mid for mid in PREFERRED_BY_TAG.get(tag, []) if mid in tagged]
-    rest = [mid for mid in tagged if mid not in preferred]
-    candidates = (preferred + rest)[:max_candidates]
-    return candidates, tag
+    return tagged[:max_candidates], tag

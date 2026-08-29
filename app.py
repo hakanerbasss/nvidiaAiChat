@@ -1,8 +1,10 @@
 import base64
 import io
 import json
+import time
 from pathlib import Path
 
+import httpx2
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -137,27 +139,38 @@ def sse(event: str, data: dict) -> str:
     return payload
 
 
-def is_model_not_found(e: Exception) -> bool:
+REQUEST_TIMEOUT = httpx2.Timeout(10.0, read=30.0, write=10.0, pool=10.0)
+FIRST_TOKEN_GRACE = 25  # saniye — bu sürede ilk gerçek içerik gelmezse model "bozuk" sayılır
+
+
+def is_retryable_failure(e: Exception) -> bool:
     """NVIDIA bazı katalog modellerini hesapta gerçek bir function olarak
-    deploy etmemiş oluyor ve 404 dönüyor — bu, o modele özgü bir hata,
-    diğer adayları denemeye devam etmek mantıklı. 401/429 gibi hatalar ise
-    hesap genelinde geçerli olduğundan hemen durup kullanıcıya gösteriyoruz."""
+    deploy etmemiş oluyor (404) ya da model sessizce hiç içerik üretmeden
+    bağlantıyı zaman aşımına uğratıyor — ikisi de o modele özgü, diğer
+    adayları denemeye devam etmek mantıklı. 401/429 gibi hatalar ise hesap
+    genelinde geçerli olduğundan hemen durup kullanıcıya gösteriyoruz."""
     if getattr(e, "status_code", None) == 404:
         return True
-    return "Error code: 404" in str(e) or "'status': 404" in str(e)
+    if isinstance(e, (httpx2.TimeoutException, TimeoutError)):
+        return True
+    text = str(e).lower()
+    return "error code: 404" in text or "'status': 404" in text or "timeout" in text or "timed out" in text
 
 
 def try_candidates(client, candidates, create_kwargs):
-    """Aday model id'lerini sırayla dener, 404'te bir sonrakine geçer.
-    (used_model, response) veya modelin hepsi başarısızsa (None, last_error) döner."""
+    """Aday model id'lerini sırayla dener, 404/zaman aşımında bir sonrakine
+    geçer. (used_model, response) veya modelin hepsi başarısızsa
+    (None, last_error) döner."""
     last_err = None
     for candidate in candidates:
         try:
-            resp = client.chat.completions.create(model=candidate, **create_kwargs)
+            resp = client.chat.completions.create(
+                model=candidate, timeout=REQUEST_TIMEOUT, **create_kwargs
+            )
             return candidate, resp
         except Exception as e:
             last_err = e
-            if not is_model_not_found(e):
+            if not is_retryable_failure(e):
                 break
     return None, last_err
 
@@ -165,6 +178,7 @@ def try_candidates(client, candidates, create_kwargs):
 @app.post("/api/chat")
 def chat(body: ChatIn):
     catalog = load_catalog().get("models", [])
+    label_by_id = {m["id"]: m.get("label", m["id"]) for m in catalog}
     user_content, has_image = build_user_content(body.message, body.attachments)
     candidates, chosen_tag = choose_candidates(catalog, body.message, has_image, body.agent_mode, body.model)
 
@@ -214,28 +228,58 @@ def chat(body: ChatIn):
             answer = choice.message.content or ""
 
         def agent_stream():
-            yield sse("meta", {"model": model_id, "tag": chosen_tag, "tools_used": tools_used})
+            yield sse("meta", {
+                "model": model_id, "label": label_by_id.get(model_id, model_id),
+                "tag": chosen_tag, "tools_used": tools_used,
+            })
             yield sse(None, {"delta": answer})
             yield sse("done", {})
 
         return StreamingResponse(agent_stream(), media_type="text/event-stream")
 
     def token_stream():
-        model_id, stream = try_candidates(client, candidates, {"messages": messages, "stream": True})
-        if model_id is None:
-            yield sse("meta", {"tag": chosen_tag, "tried": candidates})
-            yield sse("error", {"error": str(stream)})
-            return
+        last_err = None
+        for candidate in candidates:
+            try:
+                stream = client.chat.completions.create(
+                    model=candidate, messages=messages, stream=True, timeout=REQUEST_TIMEOUT
+                )
+            except Exception as e:
+                last_err = e
+                if is_retryable_failure(e):
+                    continue
+                yield sse("meta", {"tag": chosen_tag, "tried": candidates})
+                yield sse("error", {"error": str(e)})
+                return
 
-        yield sse("meta", {"model": model_id, "tag": chosen_tag})
-        try:
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    yield sse(None, {"delta": delta})
-        except Exception as e:
-            yield sse("error", {"error": str(e)})
-            return
-        yield sse("done", {})
+            got_content = False
+            start = time.monotonic()
+            try:
+                for chunk in stream:
+                    if not got_content and time.monotonic() - start > FIRST_TOKEN_GRACE:
+                        last_err = RuntimeError(f"{candidate}: {FIRST_TOKEN_GRACE}s içinde içerik gelmedi")
+                        break
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        if not got_content:
+                            got_content = True
+                            yield sse("meta", {
+                                "model": candidate, "label": label_by_id.get(candidate, candidate),
+                                "tag": chosen_tag,
+                            })
+                        yield sse(None, {"delta": delta})
+            except Exception as e:
+                if got_content:
+                    yield sse("error", {"error": str(e)})
+                    return
+                last_err = e
+
+            if got_content:
+                yield sse("done", {})
+                return
+            # bu aday hic icerik uretmedi (404, zaman asimi, sessiz baglanti) -> sonrakini dene
+
+        yield sse("meta", {"tag": chosen_tag, "tried": candidates})
+        yield sse("error", {"error": f"Denenen modellerin hiçbiri yanıt üretmedi: {last_err}"})
 
     return StreamingResponse(token_stream(), media_type="text/event-stream")
