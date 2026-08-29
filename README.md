@@ -77,7 +77,20 @@ static/          Tek sayfalık chat arayüzü (index.html, app.js, style.css)
 
 ## Dağıtım (opsiyonel)
 
-Kendi sunucunda systemd servisi olarak çalıştırmak istersen
-`deploy/nvidiaaichat.service.example` dosyasını örnek al — yolu, portu ve
-kullanıcıyı kendi ortamına göre düzenleyip `/etc/systemd/system/` altına
-kopyalaman yeterli.
+Sunucuda zaten 80 portunu nginx kullanıyor ve başka botlar başka portları
+tutuyor (8000 whatsapp, 8001 supertonic-web, 8002 instube, 8003 sitebot,
+5000/5001/5057 diğer projeler) — bu yüzden bu uygulama **8004** portunda,
+sadece `127.0.0.1`'de dinleyip nginx arkasında bir subdomain üzerinden
+yayınlanacak şekilde hazırlandı:
+
+1. Sunucuda repoyu çek, `setup` gibi venv kur (yukarıdaki Kurulum adımları).
+2. `deploy/nvidiaaichat.service.example` dosyasını
+   `/etc/systemd/system/nvidiaaichat.service` olarak kopyala, yolları kendi
+   sunucuna göre kontrol et, `systemctl enable --now nvidiaaichat`.
+3. `deploy/nginx-nvidiaaichat.conf.example` dosyasındaki `ai.wizaicorp.com`
+   adını istediğin subdomain ile değiştir, DNS'te bu subdomain için sunucunun
+   IP'sine (`77.42.45.229`) A kaydı ekle, sonra dosyanın içindeki nginx +
+   certbot adımlarını uygula.
+4. `sitebot`'un müşteriye subdomain satmasını engellemek için seçtiğin
+   subdomain'i `sitebot/config.py` içindeki `RESERVED_SUBDOMAINS` listesine
+   ekletmeyi unutma (bkz. ana repo CLAUDE.md).

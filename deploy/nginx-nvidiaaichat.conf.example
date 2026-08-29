@@ -1,0 +1,28 @@
+# /etc/nginx/sites-available/nvidiaaichat -> sites-enabled ile sembolik link
+# Subdomain adını kendi tercihine göre değiştir (DNS'te A kaydı sunucunun
+# IP'sine, 77.42.45.229, işaret etmeli).
+
+server {
+    listen 80;
+    server_name ai.wizaicorp.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8004;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # /api/chat Server-Sent Events ile token-token akıyor; nginx
+        # buffer'lamaya çalışırsa akış donmuş gibi görünür.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+    }
+}
+
+# Kurulum:
+#   sudo cp nginx-nvidiaaichat.conf.example /etc/nginx/sites-available/nvidiaaichat
+#   sudo ln -s /etc/nginx/sites-available/nvidiaaichat /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#   sudo certbot --nginx -d ai.wizaicorp.com   # HTTPS için, DNS yayıldıktan sonra
