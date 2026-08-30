@@ -50,7 +50,7 @@ def _match_families(live_ids: list) -> list:
 
 
 PROBE_ATTEMPTS = 3
-PROBE_TIMEOUT = 20
+PROBE_TIMEOUT = 45  # DeepSeek gibi çok talep gören modeller kuyrukta uzun bekleyebiliyor
 
 
 def _probe_model(client, model_id: str) -> tuple:

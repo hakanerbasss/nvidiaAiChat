@@ -153,8 +153,9 @@ def sse(event: str, data: dict) -> str:
     return payload
 
 
-REQUEST_TIMEOUT = httpx2.Timeout(10.0, read=30.0, write=10.0, pool=10.0)
-FIRST_TOKEN_GRACE = 25  # saniye — bu sürede ilk gerçek içerik gelmezse model "bozuk" sayılır
+REQUEST_TIMEOUT = httpx2.Timeout(10.0, read=45.0, write=10.0, pool=10.0)
+FIRST_TOKEN_GRACE = 40  # saniye — bu sürede ilk gerçek içerik gelmezse model "bozuk" sayılır
+                        # (DeepSeek gibi çok talep gören modeller kuyrukta uzun bekleyebiliyor)
 
 
 def is_retryable_failure(e: Exception) -> bool:
