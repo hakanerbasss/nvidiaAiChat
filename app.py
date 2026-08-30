@@ -2,7 +2,9 @@ import base64
 import io
 import json
 import threading
+import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx2
@@ -30,7 +32,29 @@ SYSTEM_PROMPT = (
     "çalışır, eksiksiz kod bloğu üret. Kullanıcı başka bir dilde yazarsa o dilde cevap ver."
 )
 
-app = FastAPI(title="NVIDIA AI Chat")
+# NVIDIA'nın ücretsiz katmanında hangi modelin ayakta olduğu sürekli
+# değişiyor (kapasite/talep). Kullanıcının elle "Kataloğu yenile"ye basmasını
+# beklemek yerine sunucu kendiliğinden periyodik olarak yeniden test ediyor.
+AUTO_REFRESH_SECONDS = 600  # 10 dakika
+
+
+def _auto_refresh_loop():
+    while True:
+        try:
+            if load_settings().get("nvidia_api_key"):
+                refresh_catalog()
+        except Exception:
+            pass  # bir sonraki turda tekrar denenecek
+        time.sleep(AUTO_REFRESH_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    threading.Thread(target=_auto_refresh_loop, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="NVIDIA AI Chat", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 

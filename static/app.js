@@ -537,4 +537,10 @@ el("newChatBtn").addEventListener("click", createConversation);
   renderActiveMessages();
   await loadStatus();
   await loadModels();
+
+  // Sunucu kataloğu arka planda kendiliğinden periyodik yeniliyor
+  // (bkz. app.py AUTO_REFRESH_SECONDS); sayfa açıkken listeyi o güncel
+  // hâliyle senkron tutmak için burada da hafifçe (sadece önbelleği okuyan
+  // bir GET, NVIDIA'ya yeni bir çağrı yapmaz) periyodik tazeliyoruz.
+  setInterval(loadModels, 60000);
 })();

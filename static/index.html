@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>NVIDIA AI Chat</title>
-<link rel="stylesheet" href="/static/style.css?v=6" />
+<link rel="stylesheet" href="/static/style.css?v=7" />
 </head>
 <body>
 <div class="app">
@@ -27,6 +27,7 @@
     <label class="field-label" for="modelSelect">Model</label>
     <select id="modelSelect"></select>
     <button class="ghost-btn" id="refreshModels">Kataloğu yenile</button>
+    <div class="muted hint-text">Sunucu kataloğu her 10 dakikada bir kendiliğinden yeniden test eder; hemen kontrol etmek istersen yukarıdaki butona basabilirsin.</div>
 
     <label class="toggle-row">
       <input type="checkbox" id="agentMode" />
@@ -83,6 +84,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=7"></script>
 </body>
 </html>
