@@ -83,6 +83,29 @@ function addRetryButton(wrap, onRetry) {
   wrap.appendChild(btn);
 }
 
+// Uzun süren işler (katalog testi, model cevabı) arka planda bir thread'de
+// çalışıp job_id dönüyor; burada kısa, bağımsız isteklerle durumunu
+// soruyoruz. Önceki sürüm uzun süre açık kalan tek bir bağlantı üzerinden
+// "nabız" akıtıyordu ama Cloudflare/nginx zincirinde bu güvenilmez çıktı
+// (sessiz aralıklar bazen hiç istemciye ulaşmıyordu). Kısa, tamamlanmış
+// istekler bu sorunu tamamen ortadan kaldırıyor — üstelik telefon sekmeyi
+// arka plana atsa bile iş sunucuda çalışmaya devam ediyor, sekmeye
+// dönüldüğünde kaldığı yerden soruluyor.
+async function pollJob(jobId, { intervalMs = 1500, timeoutMs = 280000, onTick } = {}) {
+  const start = Date.now();
+  while (true) {
+    const res = await fetch(`/api/jobs/${jobId}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const job = await res.json();
+    if (job.status === "done") return job.result;
+    if (job.status === "error") throw new Error(job.error || "bilinmeyen hata");
+    if (job.status === "not_found") throw new Error("iş bulunamadı (sunucu yeniden başlamış olabilir), tekrar dene");
+    if (Date.now() - start > timeoutMs) throw new Error("zaman aşımı — sunucu çok uzun süredir yanıt vermiyor");
+    if (onTick) onTick(job);
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 // --- Sohbetler (localStorage'da, tarayıcıya özel) ---
 function activeConversation() {
   return state.conversations.find((c) => c.id === state.activeId) || null;
@@ -288,43 +311,11 @@ async function loadModels() {
   }
 }
 
-// /api/models/refresh birkaç dakika sürebilir (her modeli gerçekten test
-// ediyor, 429/zaman aşımında tekrar deniyor); Cloudflare bağlantıyı sessiz
-// sanıp kesmesin diye sunucu periyodik boş "nabız" gönderiyor. Burada o
-// nabızları sayıp ilerleme göstergesi olarak kullanıyoruz.
-async function refreshCatalogSSE(onTick) {
+async function refreshCatalog(onTick) {
   const res = await fetch("/api/models/refresh", { method: "POST" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let result = null;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop();
-
-    for (const raw of events) {
-      let eventName = "message";
-      let dataLine = "";
-      for (const line of raw.split("\n")) {
-        if (line.startsWith("event: ")) eventName = line.slice(7).trim();
-        else if (line.startsWith("data: ")) dataLine = line.slice(6);
-      }
-      if (!dataLine) continue;
-      const payload = JSON.parse(dataLine);
-      if (eventName === "result") result = payload;
-      else if (onTick) onTick();
-    }
-  }
-
-  if (!result) throw new Error("Sunucudan sonuç gelmedi");
-  if (!result.ok) throw new Error(result.error || "Bilinmeyen hata");
-  return result;
+  const { job_id } = await res.json();
+  return await pollJob(job_id, { intervalMs: 2000, timeoutMs: 320000, onTick });
 }
 
 el("refreshModels").addEventListener("click", async () => {
@@ -336,7 +327,7 @@ el("refreshModels").addEventListener("click", async () => {
   };
   tick();
   try {
-    await refreshCatalogSSE(tick);
+    await refreshCatalog(tick);
     await loadModels();
   } catch (e) {
     alert("Katalog yenilenemedi: " + e.message);
@@ -368,9 +359,9 @@ el("saveSettings").addEventListener("click", async () => {
     el("apiKeyInput").value = "";
     await loadStatus();
 
-    msg.textContent = "Kaydedildi, modeller test ediliyor (bir dakikaya kadar sürebilir)…";
+    msg.textContent = "Kaydedildi, modeller test ediliyor (birkaç dakika sürebilir)…";
     try {
-      await refreshCatalogSSE();
+      await refreshCatalog();
       msg.textContent = "Kaydedildi, katalog yenilendi.";
     } catch (e) {
       msg.textContent = "Kaydedildi (katalog yenilenemedi: " + e.message + ")";
@@ -428,7 +419,7 @@ function renderAttachmentChip(name, statusLabel) {
   return api;
 }
 
-// --- Sohbet gönderimi (SSE benzeri stream parse) ---
+// --- Sohbet gönderimi ---
 const messageInput = el("messageInput");
 messageInput.addEventListener("input", () => {
   messageInput.style.height = "auto";
@@ -441,35 +432,21 @@ messageInput.addEventListener("keydown", (ev) => {
   }
 });
 
-const STALL_TIMEOUT_MS = 30000;
-
 // conv.messages'a kullanıcı mesajını EKLEMEDEN sadece asistan cevabını ister —
 // böylece "Tekrar dene" aynı fonksiyonu çağırdığında kullanıcı mesajı
-// geçmişte ikilenmez, sadece asistan yanıtı yeniden denenir.
+// geçmişte ikilenmez, sadece asistan yanıtı yeniden denenir. Cevap artık
+// token-token akmıyor (bkz. pollJob yorumu) — hazır olunca tek seferde geliyor.
 async function requestAssistantReply(conv, text, attachmentsForRequest) {
   const sendBtn = document.querySelector(".send-btn");
   sendBtn.disabled = true;
 
   const priorHistory = conv.messages.map((m) => ({ role: m.role, content: m.content }));
   const assistant = addTypingMessage();
-  let full = "";
-  let gotFirstToken = false;
-  let metaText = "";
-  let gotAnyEvent = false;
-
-  const controller = new AbortController();
-  let watchdog = null;
-  const armWatchdog = () => {
-    clearTimeout(watchdog);
-    watchdog = setTimeout(() => controller.abort(), STALL_TIMEOUT_MS);
-  };
 
   try {
-    armWatchdog();
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
       body: JSON.stringify({
         message: text,
         history: priorHistory,
@@ -484,81 +461,37 @@ async function requestAssistantReply(conv, text, attachmentsForRequest) {
       throw new Error(data.error || `HTTP ${res.status}`);
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+    const { job_id } = await res.json();
+    const result = await pollJob(job_id, { intervalMs: 1500, timeoutMs: 280000 });
 
-    while (true) {
-      const { value, done } = await reader.read();
-      armWatchdog();
-      if (done) break;
-      gotAnyEvent = true;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split("\n\n");
-      buffer = events.pop();
+    const toolNote = result.tools_used && result.tools_used.length
+      ? ` · araç: ${result.tools_used.join(", ")}`
+      : "";
+    const metaText = `${result.label || result.model} (${result.tag})${toolNote}`;
+    const answer = result.answer || "[boş cevap geldi — model muhtemelen bir şey döndürmedi]";
 
-      for (const raw of events) {
-        let eventName = "message";
-        let dataLine = "";
-        for (const line of raw.split("\n")) {
-          if (line.startsWith("event: ")) eventName = line.slice(7).trim();
-          else if (line.startsWith("data: ")) dataLine = line.slice(6);
-        }
-        if (!dataLine) continue;
-        const payload = JSON.parse(dataLine);
+    assistant.bubble.innerHTML = renderMarkdown(answer);
+    assistant.setMeta(metaText);
+    sendBtn.disabled = false;
 
-        if (eventName === "meta") {
-          const toolNote = payload.tools_used && payload.tools_used.length
-            ? ` · araç: ${payload.tools_used.join(", ")}`
-            : "";
-          metaText = payload.model ? `${payload.label || payload.model} (${payload.tag})${toolNote}` : "";
-          if (metaText) assistant.setMeta(metaText);
-        } else if (eventName === "error") {
-          full += `\n\n[hata: ${payload.error}]`;
-          assistant.bubble.innerHTML = renderMarkdown(full);
-        } else if (eventName === "done") {
-          // stream bitti
-        } else if (payload.delta) {
-          if (!gotFirstToken) { full = ""; gotFirstToken = true; }
-          full += payload.delta;
-          assistant.bubble.innerHTML = renderMarkdown(full);
-          messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
-      }
+    conv.messages.push({ role: "user", content: text, at: Date.now() });
+    conv.messages.push({ role: "assistant", content: answer, meta: metaText, at: Date.now() });
+    conv.updatedAt = Date.now();
+    if (conv.title === "Yeni sohbet" && text) {
+      conv.title = text.length > 40 ? text.slice(0, 40) + "…" : text;
+      mobileTitleEl.textContent = conv.title;
     }
-    if (!gotFirstToken && !full) {
-      full = "[boş cevap geldi — model muhtemelen bir şey döndürmedi, tekrar dene]";
-      assistant.bubble.innerHTML = renderMarkdown(full);
-    }
+    saveConversations();
+    renderConversationList();
   } catch (e) {
-    const isAbort = e.name === "AbortError";
-    full = isAbort
-      ? (gotAnyEvent
-          ? "[bağlantı koptu — telefon uygulamayı arka planda kısıtlamış olabilir (özellikle Xiaomi/MIUI pil tasarrufu). Chrome'un pil kısıtlamasını 'Kısıtlama yok' yap ve tekrar dene]"
-          : "[zaman aşımı — sunucudan yanıt gelmedi, tekrar dene]")
-      : `[istek başarısız: ${e.message}]`;
-    assistant.bubble.innerHTML = renderMarkdown(full);
+    assistant.bubble.innerHTML = renderMarkdown(`[istek başarısız: ${e.message}]`);
     addRetryButton(assistant.wrap, () => {
       assistant.wrap.remove();
       requestAssistantReply(conv, text, attachmentsForRequest);
     });
     sendBtn.disabled = false;
-    clearTimeout(watchdog);
-    return; // hata durumunda gecmise hicbir sey eklenmedi, tekrar dene ayni turu yeniden dener
-  } finally {
-    clearTimeout(watchdog);
+    // hata durumunda geçmişe hiçbir şey eklenmedi, tekrar dene aynı turu yeniden dener
   }
-  sendBtn.disabled = false;
-
-  conv.messages.push({ role: "user", content: text, at: Date.now() });
-  conv.messages.push({ role: "assistant", content: full, meta: metaText, at: Date.now() });
-  conv.updatedAt = Date.now();
-  if (conv.title === "Yeni sohbet" && text) {
-    conv.title = text.length > 40 ? text.slice(0, 40) + "…" : text;
-    mobileTitleEl.textContent = conv.title;
-  }
-  saveConversations();
-  renderConversationList();
 }
 
 el("chatForm").addEventListener("submit", async (ev) => {

@@ -34,6 +34,23 @@ araç çağırma.
   (`get_current_datetime`) var; yeni bir araç eklemek için `tools.py`
   içine fonksiyon tanımı + karşılığını yazman yeterli (dosya arama, kod
   çalıştırma, web isteği gibi araçlar aynı desene eklenebilir).
+- **Model doğrulama** (`catalog.py`) — NVIDIA'nın kataloğu yüzlerce model
+  içeriyor ama bazıları hesapta deploy edilmemiş (404) ya da aşırı
+  talepten zaman aşımına uğruyor (DeepSeek gibi popüler modeller). Kataloğu
+  yenilerken bilinen aileler (`CURATED_FAMILIES`) her biri gerçekten
+  çağrılarak paralel test edilir; sadece o an çalışanlar gösterilir,
+  elenenlerin gerçek hata mesajı `/api/models` yanıtındaki
+  `diagnostics`'te görülebilir.
+- **Uzun işler arka planda** (`app.py`) — hem sohbet cevabı hem katalog
+  testi bir job olarak arka plan thread'inde başlatılır, istemci
+  `/api/jobs/{id}`'yi birkaç saniyede bir sorar (`pollJob` — `app.js`).
+  İlk sürüm bunun yerine uzun süre açık kalan tek bir bağlantı üzerinden
+  "nabız" akıtıyordu ama Cloudflare/nginx zincirinde bu güvenilmez çıktı
+  (sessiz aralıklar istemciye hiç ulaşmayabiliyordu). Kısa/bağımsız
+  sorgulama isteği daha sağlam: telefon sekmeyi arka plana atsa bile iş
+  sunucuda çalışmaya devam ediyor, sekmeye dönüldüğünde kaldığı yerden
+  soruluyor. Bedeli: cevap artık token-token akmıyor, hazır olunca tek
+  parça geliyor.
 
 ## Kurulum
 
@@ -55,7 +72,8 @@ istemiyor, ücretsiz katman ~40 istek/dk sınırlı.
 
 ```
 app.py           FastAPI router'ları — /api/status, /api/settings,
-                 /api/models, /api/upload, /api/chat
+                 /api/models, /api/models/refresh, /api/upload, /api/chat,
+                 /api/jobs/{id} (arka plan iş durumu sorgulama)
 nvidia_client.py NVIDIA NIM'e OpenAI-uyumlu client + settings.json okuma/yazma
 catalog.py       Canlı model listesi çekme + aile bazlı etiketleme
 router.py        "Otomatik" moddaki model seçim mantığı
@@ -65,15 +83,17 @@ static/          Tek sayfalık chat arayüzü (index.html, app.js, style.css)
 
 ## Bilinen v1 sınırları
 
-- Ajan modunda cevap token-token akmıyor, araç sonucu hazır olunca tek
-  parça geliyor (araç çağrısı + streaming'i aynı anda doğru yapmak daha
-  karmaşık; sıradaki adım olarak eklenebilir).
+- Cevap token-token akmıyor (bkz. yukarıdaki "Uzun işler arka planda"),
+  yazıyor animasyonu gösterilip cevap hazır olunca tek parça geliyor.
 - Sohbet geçmişi (`history`) sadece düz metin olarak tutuluyor — önceki
   turdaki bir görsel, yeni turda modele tekrar gönderilmiyor.
 - PDF'ler sadece metin katmanı varsa okunabiliyor (taranmış/görüntü PDF
   için OCR yok).
 - Tek kullanıcılık: `settings.json` sunucu genelinde tek bir API key
   tutuyor, çoklu kullanıcı/oturum ayrımı yok.
+- İş durumu (`_jobs`) sadece bellekte tutuluyor — `systemctl restart`
+  sırasında yarım kalan bir iş kaybolur (istemci "iş bulunamadı" hatası
+  görüp otomatik tekrar dener).
 
 ## Dağıtım (opsiyonel)
 

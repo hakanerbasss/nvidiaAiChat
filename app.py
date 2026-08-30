@@ -1,15 +1,13 @@
-import asyncio
 import base64
 import io
 import json
-import queue
 import threading
-import time
+import uuid
 from pathlib import Path
 
 import httpx2
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -36,6 +34,48 @@ app = FastAPI(title="NVIDIA AI Chat")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
+# --- Basit arka plan iş kuyruğu (tek process, bellek içi) ---
+#
+# İlk sürümde /api/chat ve /api/models/refresh uzun süre açık kalan bir
+# bağlantı üzerinden token/nabız akıtıyordu (SSE). Cloudflare + nginx
+# zincirinde bu, uzun sessiz aralıklarda güvenilmez çıktı: nabızlar bazen
+# istemciye hiç ulaşmıyor, bağlantı saatlerce "sessiz" görünüp donuyordu.
+# Çözüm: uzun işlemi arka planda bir thread'de başlat, istemciye hemen bir
+# job_id dön; istemci /api/jobs/{id}'yi birkaç saniyede bir sorar. Her
+# sorgu kısa, tamamlanmış, bağımsız bir istek olduğu için arada hiçbir şey
+# buffer'lanamaz/kaybolamaz — token-token canlı akışı kaybediyoruz ama
+# gerçekten çalışan bir sistem kazanıyoruz.
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+
+
+def start_job(fn) -> str:
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {"status": "running", "result": None, "error": None}
+
+    def runner():
+        try:
+            result = fn()
+            with _jobs_lock:
+                _jobs[job_id] = {"status": "done", "result": result, "error": None}
+        except Exception as e:
+            with _jobs_lock:
+                _jobs[job_id] = {"status": "error", "result": None, "error": str(e)}
+
+    threading.Thread(target=runner, daemon=True).start()
+    return job_id
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return {"status": "not_found"}
+    return job
+
+
 @app.get("/")
 def index():
     return FileResponse(BASE_DIR / "static" / "index.html")
@@ -57,10 +97,6 @@ def update_settings(body: SettingsIn):
     if not key:
         return JSONResponse({"error": "API key boş olamaz."}, status_code=400)
     save_settings(key)
-    # Katalog yenileme birkaç dakika sürebilir (bkz. /api/models/refresh) — bu
-    # düz JSON uç noktasını Cloudflare'ın zaman aşımına karşı savunmasız
-    # bırakmamak için burada tetiklemiyoruz; istemci kaydettikten hemen sonra
-    # ayrıca /api/models/refresh'i (SSE tabanlı, nabızlı) çağırıyor.
     return {"ok": True}
 
 
@@ -70,23 +106,8 @@ def get_models():
 
 
 @app.post("/api/models/refresh")
-async def post_refresh_models():
-    async def stream():
-        result, err = None, None
-        async for kind, payload in call_with_keepalive(refresh_catalog):
-            if kind == "ping":
-                yield sse(None, {})
-                continue
-            if kind == "end":
-                result = payload
-            else:
-                err = payload
-        if result is not None:
-            yield sse("result", {"ok": True, **result})
-        else:
-            yield sse("result", {"ok": False, "error": str(err)})
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
+def post_refresh_models():
+    return {"job_id": start_job(refresh_catalog)}
 
 
 @app.post("/api/upload")
@@ -146,24 +167,15 @@ def build_user_content(message: str, attachments: list):
     return full_text, False
 
 
-def sse(event: str, data: dict) -> str:
-    payload = f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-    if event:
-        return f"event: {event}\n{payload}"
-    return payload
-
-
-REQUEST_TIMEOUT = httpx2.Timeout(10.0, read=45.0, write=10.0, pool=10.0)
-FIRST_TOKEN_GRACE = 40  # saniye — bu sürede ilk gerçek içerik gelmezse model "bozuk" sayılır
-                        # (DeepSeek gibi çok talep gören modeller kuyrukta uzun bekleyebiliyor)
+SINGLE_CALL_TIMEOUT = httpx2.Timeout(10.0, read=50.0, write=10.0, pool=10.0)
 
 
 def is_retryable_failure(e: Exception) -> bool:
     """NVIDIA bazı katalog modellerini hesapta gerçek bir function olarak
-    deploy etmemiş oluyor (404) ya da model sessizce hiç içerik üretmeden
-    bağlantıyı zaman aşımına uğratıyor — ikisi de o modele özgü, diğer
-    adayları denemeye devam etmek mantıklı. 401/429 gibi hatalar ise hesap
-    genelinde geçerli olduğundan hemen durup kullanıcıya gösteriyoruz."""
+    deploy etmemiş oluyor (404) ya da model uzun süre hiç içerik üretmeden
+    zaman aşımına uğratıyor — ikisi de o modele özgü, diğer adayları
+    denemeye devam etmek mantıklı. 401/429 gibi hatalar ise hesap genelinde
+    geçerli olduğundan hemen durup kullanıcıya gösteriyoruz."""
     if getattr(e, "status_code", None) == 404:
         return True
     if isinstance(e, (httpx2.TimeoutException, TimeoutError)):
@@ -172,55 +184,58 @@ def is_retryable_failure(e: Exception) -> bool:
     return "error code: 404" in text or "'status': 404" in text or "timeout" in text or "timed out" in text
 
 
-KEEPALIVE_SECONDS = 15  # Cloudflare'in ~100sn kenar zaman aşımını asla riske atmayacak sıklık
-
-
-def _blocking_worker(fn, q: "queue.Queue"):
-    try:
-        q.put(("end", fn()))
-    except Exception as e:
-        q.put(("error", e))
-
-
-def _stream_worker(fn, q: "queue.Queue"):
-    """fn() bir OpenAI stream objesi döner; her parçayı kuyruğa koyar."""
-    try:
-        for chunk in fn():
-            delta = chunk.choices[0].delta.content if chunk.choices else None
-            if delta:
-                q.put(("delta", delta))
-        q.put(("end", None))
-    except Exception as e:
-        q.put(("error", e))
-
-
-async def _drain_with_keepalive(q: "queue.Queue"):
-    """Kuyruktaki öğeleri async olarak sırayla verir; kuyruk KEEPALIVE_SECONDS
-    boyunca boşsa ("ping", None) döner ki Cloudflare/nginx bağlantıyı sessiz
-    sanıp erken kesmesin. ("end"|"error", ...) gelince durur."""
-    while True:
+def run_chat_job(client, candidates, messages, agent_mode, chosen_tag, label_by_id) -> dict:
+    """Aday modelleri sırayla dener (404/zaman aşımında sıradakine geçer),
+    ilk başarılı cevabı {answer, model, label, tag, tools_used} olarak döner.
+    Bu, arka plan thread'inde çalışıyor — burada istediğimiz kadar
+    bekleyebiliriz, istemci ayrı isteklerle durumu soruyor."""
+    last_err = None
+    for candidate in candidates:
         try:
-            kind, payload = await asyncio.to_thread(q.get, True, KEEPALIVE_SECONDS)
-        except queue.Empty:
-            yield "ping", None
-            continue
-        yield kind, payload
-        if kind in ("end", "error"):
-            return
+            if agent_mode:
+                resp = client.chat.completions.create(
+                    model=candidate, messages=messages, tools=TOOLS, tool_choice="auto",
+                    timeout=SINGLE_CALL_TIMEOUT,
+                )
+                choice = resp.choices[0]
+                tool_calls = choice.message.tool_calls or []
+                tools_used = [c.function.name for c in tool_calls]
+                answer = choice.message.content or ""
 
+                if tool_calls:
+                    messages.append(choice.message.model_dump())
+                    for call in tool_calls:
+                        args = json.loads(call.function.arguments or "{}")
+                        tool_result = execute_tool(call.function.name, args)
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": tool_result})
+                    final = client.chat.completions.create(
+                        model=candidate, messages=messages, timeout=SINGLE_CALL_TIMEOUT
+                    )
+                    answer = final.choices[0].message.content or ""
 
-async def call_with_keepalive(fn):
-    """fn'yi arka planda bir thread'de çalıştırır; bekleme sırasında
-    ("ping", None) üretir, sonunda tam olarak bir kez ("end", result) veya
-    ("error", exc) üretir."""
-    q: "queue.Queue" = queue.Queue()
-    threading.Thread(target=_blocking_worker, args=(fn, q), daemon=True).start()
-    async for kind, payload in _drain_with_keepalive(q):
-        yield kind, payload
+                return {
+                    "answer": answer, "model": candidate, "label": label_by_id.get(candidate, candidate),
+                    "tag": chosen_tag, "tools_used": tools_used,
+                }
+
+            resp = client.chat.completions.create(
+                model=candidate, messages=messages, timeout=SINGLE_CALL_TIMEOUT
+            )
+            answer = resp.choices[0].message.content or ""
+            return {
+                "answer": answer, "model": candidate, "label": label_by_id.get(candidate, candidate),
+                "tag": chosen_tag, "tools_used": [],
+            }
+        except Exception as e:
+            last_err = e
+            if not is_retryable_failure(e):
+                break
+
+    raise RuntimeError(f"Denenen modellerin hiçbiri yanıt üretmedi ({len(candidates)} model): {last_err}")
 
 
 @app.post("/api/chat")
-async def chat(body: ChatIn):
+def chat(body: ChatIn):
     catalog = load_catalog().get("models", [])
     label_by_id = {m["id"]: m.get("label", m["id"]) for m in catalog}
     user_content, has_image = build_user_content(body.message, body.attachments)
@@ -239,115 +254,7 @@ async def chat(body: ChatIn):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, *body.history,
                 {"role": "user", "content": user_content}]
 
-    if body.agent_mode:
-        async def agent_stream():
-            model_id, first, last_err = None, None, None
-            for candidate in candidates:
-                call = (lambda c=candidate: client.chat.completions.create(
-                    model=c, messages=messages, tools=TOOLS, tool_choice="auto", timeout=REQUEST_TIMEOUT
-                ))
-                result, err = None, None
-                async for kind, payload in call_with_keepalive(call):
-                    if kind == "ping":
-                        yield sse(None, {})
-                        continue
-                    if kind == "end":
-                        result = payload
-                    else:
-                        err = payload
-                if result is not None:
-                    model_id, first = candidate, result
-                    break
-                last_err = err
-                if not is_retryable_failure(err):
-                    break
-
-            if model_id is None:
-                yield sse("meta", {"tag": chosen_tag, "tried": candidates})
-                yield sse("error", {"error": str(last_err)})
-                return
-
-            choice = first.choices[0]
-            tool_calls = choice.message.tool_calls or []
-            tools_used = [c.function.name for c in tool_calls]
-
-            answer = choice.message.content or ""
-            if tool_calls:
-                messages.append(choice.message.model_dump())
-                for call in tool_calls:
-                    args = json.loads(call.function.arguments or "{}")
-                    tool_result = execute_tool(call.function.name, args)
-                    messages.append({"role": "tool", "tool_call_id": call.id, "content": tool_result})
-
-                final, ferr = None, None
-                async for kind, payload in call_with_keepalive(
-                    lambda: client.chat.completions.create(model=model_id, messages=messages, timeout=REQUEST_TIMEOUT)
-                ):
-                    if kind == "ping":
-                        yield sse(None, {})
-                        continue
-                    if kind == "end":
-                        final = payload
-                    else:
-                        ferr = payload
-                if final is None:
-                    yield sse("meta", {"model": model_id, "label": label_by_id.get(model_id, model_id), "tag": chosen_tag})
-                    yield sse("error", {"error": str(ferr)})
-                    return
-                answer = final.choices[0].message.content or ""
-
-            yield sse("meta", {
-                "model": model_id, "label": label_by_id.get(model_id, model_id),
-                "tag": chosen_tag, "tools_used": tools_used,
-            })
-            yield sse(None, {"delta": answer})
-            yield sse("done", {})
-
-        return StreamingResponse(agent_stream(), media_type="text/event-stream")
-
-    async def token_stream():
-        last_err = None
-        for candidate in candidates:
-            call = (lambda c=candidate: client.chat.completions.create(
-                model=c, messages=messages, stream=True, timeout=REQUEST_TIMEOUT
-            ))
-            q: "queue.Queue" = queue.Queue()
-            threading.Thread(target=_stream_worker, args=(call, q), daemon=True).start()
-
-            got_content = False
-            start = time.monotonic()
-            candidate_err = None
-            async for kind, payload in _drain_with_keepalive(q):
-                if kind == "ping":
-                    if not got_content and time.monotonic() - start > FIRST_TOKEN_GRACE:
-                        candidate_err = RuntimeError(f"{candidate}: {FIRST_TOKEN_GRACE}s içinde içerik gelmedi")
-                        break
-                    yield sse(None, {})
-                    continue
-                if kind == "delta":
-                    if not got_content:
-                        got_content = True
-                        yield sse("meta", {
-                            "model": candidate, "label": label_by_id.get(candidate, candidate),
-                            "tag": chosen_tag,
-                        })
-                    yield sse(None, {"delta": payload})
-                elif kind == "error":
-                    candidate_err = payload
-                    if got_content:
-                        yield sse("error", {"error": str(payload)})
-                        return
-                    break
-                elif kind == "end":
-                    break
-
-            if got_content:
-                yield sse("done", {})
-                return
-            last_err = candidate_err or last_err
-            # bu aday hic icerik uretmedi (404, zaman asimi, sessiz baglanti) -> sonrakini dene
-
-        yield sse("meta", {"tag": chosen_tag, "tried": candidates})
-        yield sse("error", {"error": f"Denenen modellerin hiçbiri yanıt üretmedi: {last_err}"})
-
-    return StreamingResponse(token_stream(), media_type="text/event-stream")
+    job_id = start_job(lambda: run_chat_job(
+        client, candidates, messages, body.agent_mode, chosen_tag, label_by_id
+    ))
+    return {"job_id": job_id}
